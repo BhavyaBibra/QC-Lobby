@@ -3,7 +3,10 @@ from app.api.v1 import health
 from app.core.config import settings
 from app.api.v1 import teams
 from app.api.v1 import jobs
+from fastapi.security import HTTPBearer
 
+
+security = HTTPBearer()
 
 
 app = FastAPI(
@@ -13,6 +16,7 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
 )
+
 
 app.include_router(health.router, prefix="/v1", tags=["health"])
 
