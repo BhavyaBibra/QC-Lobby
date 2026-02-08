@@ -18,14 +18,24 @@ class Settings(BaseSettings):
     SUPABASE_SERVICE_KEY: str
 
     # n8n Integration
-    N8N_WEBHOOK_URL: str = "https://n8n.srv1108165.hstgr.cloud/webhook/90dbb8a2-87c5-4705-9944-22b90d976c32"
-    N8N_API_KEY: str = "qclobby_n8n_key_7d5c9f3a2b8e41c0a9f6e2d7b3c1f5a8"
+    N8N_WEBHOOK_URL: str
+    N8N_API_KEY: str
     N8N_CALLBACK_BASE_URL: Optional[str] = None  # Your backend's public URL for n8n callbacks
     USE_N8N_PROCESSING: bool = True  # Set to False to use mock processing
 
     class Config:
         env_file = BASE_DIR / ".env"
         env_file_encoding = "utf-8"
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        if self.USE_N8N_PROCESSING and not self.N8N_CALLBACK_BASE_URL:
+            import warnings
+            warnings.warn(
+                "N8N_CALLBACK_BASE_URL is not set. n8n workflow will not be able to "
+                "send callbacks unless the URL is hardcoded in the workflow.",
+                UserWarning
+            )
 
 
 settings = Settings()

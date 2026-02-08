@@ -55,24 +55,60 @@ class FailurePayload(BaseModel):
 # Format Transformation Utilities
 # ============================================
 
-def parse_timestamp(ts: str) -> dict:
+def parse_timestamp(ts: Union[str, int, float]) -> dict:
     """
     Parse timestamp string to display format and seconds.
-    Handles formats: "00:00:03:00" (HH:MM:SS:FF) or "00:00:03" (HH:MM:SS)
+    Handles formats: "00:00:03:00" (HH:MM:SS:FF), "00:00:03" (HH:MM:SS),
+    float seconds (12.5), or int seconds (12).
     """
+    # Handle non-string inputs (e.g. raw seconds from AI output)
+    if isinstance(ts, (int, float)):
+        seconds = int(ts)
+        # Convert seconds to HH:MM:SS
+        h = seconds // 3600
+        m = (seconds % 3600) // 60
+        s = seconds % 60
+        return {
+            "display": f"{h:02d}:{m:02d}:{s:02d}",
+            "seconds": seconds
+        }
+
+    # Handle string inputs
+    ts = str(ts).strip()
+    
+    # Try parsing as float string "12.5"
+    try:
+        seconds = int(float(ts))
+        h = seconds // 3600
+        m = (seconds % 3600) // 60
+        s = seconds % 60
+        return {
+            "display": f"{h:02d}:{m:02d}:{s:02d}",
+            "seconds": seconds
+        }
+    except ValueError:
+        pass
+    
     parts = ts.split(':')
-    hours = int(parts[0]) if len(parts) > 0 else 0
-    mins = int(parts[1]) if len(parts) > 1 else 0
-    secs = int(parts[2]) if len(parts) > 2 else 0
-    # Ignore frame number if present (4th part)
-    
-    display = f"{parts[0]}:{parts[1]}:{parts[2]}" if len(parts) >= 3 else ts
-    total_seconds = hours * 3600 + mins * 60 + secs
-    
-    return {
-        "display": display,
-        "seconds": total_seconds
-    }
+    try:
+        hours = int(parts[0]) if len(parts) > 0 else 0
+        mins = int(parts[1]) if len(parts) > 1 else 0
+        secs = int(parts[2]) if len(parts) > 2 else 0
+        # Ignore frame number if present (4th part)
+        
+        display = f"{hours:02d}:{mins:02d}:{secs:02d}"
+        total_seconds = hours * 3600 + mins * 60 + secs
+        
+        return {
+            "display": display,
+            "seconds": total_seconds
+        }
+    except (ValueError, IndexError):
+        # Fallback for completely unparsable strings
+        return {
+            "display": ts,
+            "seconds": 0
+        }
 
 
 def parse_legacy_comment(item: dict) -> dict:
@@ -172,6 +208,13 @@ def transform_legacy_results(results: List[dict]) -> dict:
 def normalize_qc_result(qc_result: Union[Dict, List]) -> dict:
     """
     Normalize qc_result to structured format regardless of input format.
+    
+    Handles:
+    1. List of legacy items: [{ timestamp, text }, ...]
+    2. Dict with 'results': { results: [{ timestamp, text }, ...] }
+    3. Dict with 'issues': { issues: [{ timestamp, text }, ...], qc_mode, video_url }
+    4. Dict with legacy item: { timestamp, text }
+    5. Already structured: { comments: [...], summary: {...} }
     """
     # If it's already a list, treat as legacy format
     if isinstance(qc_result, list):
@@ -180,6 +223,19 @@ def normalize_qc_result(qc_result: Union[Dict, List]) -> dict:
     # If it's a dict but has 'results' key with a list, it's legacy wrapper
     if isinstance(qc_result, dict) and "results" in qc_result and isinstance(qc_result["results"], list):
         return transform_legacy_results(qc_result["results"])
+    
+    # Handle n8n format: { issues: [...], qc_mode, video_url, analyzed_at }
+    if isinstance(qc_result, dict) and "issues" in qc_result and isinstance(qc_result["issues"], list):
+        issues = qc_result["issues"]
+        transformed = transform_legacy_results(issues)
+        # Preserve additional metadata from n8n
+        if "qc_mode" in qc_result:
+            transformed["qc_mode"] = qc_result["qc_mode"]
+        if "video_url" in qc_result:
+            transformed["video_url"] = qc_result["video_url"]
+        if "analyzed_at" in qc_result:
+            transformed["analyzed_at"] = qc_result["analyzed_at"]
+        return transformed
     
     # If it's a dict with legacy items (timestamp + text), transform it
     if isinstance(qc_result, dict) and "timestamp" in qc_result and "text" in qc_result:
@@ -271,6 +327,16 @@ def complete_job(
     - Legacy: [{ timestamp, text }, ...]
     """
     validate_n8n_auth(x_api_key)
+    
+    # Debug: log incoming payload to understand n8n format
+    print(f"[callback] Received complete callback for job: {payload.job_id}")
+    print(f"[callback] qc_result type: {type(payload.qc_result)}")
+    if isinstance(payload.qc_result, list):
+        print(f"[callback] qc_result is list with {len(payload.qc_result)} items")
+        if payload.qc_result:
+            print(f"[callback] First item keys: {payload.qc_result[0].keys() if isinstance(payload.qc_result[0], dict) else 'not a dict'}")
+    elif isinstance(payload.qc_result, dict):
+        print(f"[callback] qc_result keys: {payload.qc_result.keys()}")
     
     # Verify job exists and is in a valid state
     job_res = (

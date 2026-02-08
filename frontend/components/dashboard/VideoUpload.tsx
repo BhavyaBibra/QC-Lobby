@@ -2,6 +2,7 @@
 
 import { useState, useRef } from 'react';
 import { jobsApi } from '@/lib/api';
+import { supabase, getCurrentUser } from '@/lib/auth';
 
 interface VideoUploadProps {
   qcMode: 'polisher' | 'guardian';
@@ -16,14 +17,52 @@ export default function VideoUpload({ qcMode, onJobCreated }: VideoUploadProps) 
   const [videoDuration, setVideoDuration] = useState<number | null>(null);
   const [thumbnail, setThumbnail] = useState<string | null>(null);
   const [loadingDuration, setLoadingDuration] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<number>(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Upload video to Supabase Storage
+  const uploadVideo = async (file: File): Promise<string> => {
+    const user = await getCurrentUser();
+    if (!user) {
+      throw new Error('You must be logged in to upload videos');
+    }
+
+    // Generate unique filename with user folder structure
+    const timestamp = Date.now();
+    const sanitizedFilename = file.name.replace(/[^a-zA-Z0-9.-]/g, '_');
+    const fileName = `${user.id}/${timestamp}_${sanitizedFilename}`;
+
+    setUploadProgress(10); // Starting upload
+
+    const { data, error } = await supabase.storage
+      .from('qc-videos')
+      .upload(fileName, file, {
+        cacheControl: '3600',
+        upsert: false
+      });
+
+    if (error) {
+      throw new Error(`Upload failed: ${error.message}`);
+    }
+
+    setUploadProgress(90); // Upload complete, getting URL
+
+    // Get the public URL
+    const { data: urlData } = supabase.storage
+      .from('qc-videos')
+      .getPublicUrl(data.path);
+
+    setUploadProgress(100);
+
+    return urlData.publicUrl;
+  };
 
   // Get video duration and thumbnail from file
   const getVideoMetadata = (file: File): Promise<{ duration: number; thumbnail: string }> => {
     return new Promise((resolve, reject) => {
       const video = document.createElement('video');
       video.preload = 'metadata';
-      
+
       video.onloadedmetadata = () => {
         // Seek to 1 second or 10% of the video, whichever is smaller
         const seekTime = Math.min(1, video.duration * 0.1);
@@ -35,14 +74,14 @@ export default function VideoUpload({ qcMode, onJobCreated }: VideoUploadProps) 
         const canvas = document.createElement('canvas');
         canvas.width = 320;
         canvas.height = 180;
-        
+
         const ctx = canvas.getContext('2d');
         if (ctx) {
           const videoAspect = video.videoWidth / video.videoHeight;
           const canvasAspect = canvas.width / canvas.height;
-          
+
           let drawWidth, drawHeight, offsetX, offsetY;
-          
+
           if (videoAspect > canvasAspect) {
             drawHeight = canvas.height;
             drawWidth = drawHeight * videoAspect;
@@ -54,22 +93,22 @@ export default function VideoUpload({ qcMode, onJobCreated }: VideoUploadProps) 
             offsetX = 0;
             offsetY = -(drawHeight - canvas.height) / 2;
           }
-          
+
           ctx.drawImage(video, offsetX, offsetY, drawWidth, drawHeight);
         }
-        
+
         const thumbnailDataUrl = canvas.toDataURL('image/jpeg', 0.7);
         const duration = Math.ceil(video.duration);
-        
+
         window.URL.revokeObjectURL(video.src);
         resolve({ duration, thumbnail: thumbnailDataUrl });
       };
-      
+
       video.onerror = () => {
         window.URL.revokeObjectURL(video.src);
         reject(new Error('Failed to load video metadata'));
       };
-      
+
       video.src = URL.createObjectURL(file);
     });
   };
@@ -80,7 +119,7 @@ export default function VideoUpload({ qcMode, onJobCreated }: VideoUploadProps) 
     setLoadingDuration(true);
     setVideoDuration(null);
     setThumbnail(null);
-    
+
     try {
       const { duration, thumbnail } = await getVideoMetadata(file);
       setVideoDuration(duration);
@@ -160,12 +199,13 @@ export default function VideoUpload({ qcMode, onJobCreated }: VideoUploadProps) 
 
     setError(null);
     setLoading(true);
+    setUploadProgress(0);
 
     try {
-      const videoUrl = `mock://${selectedFile.name}`;
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/5eb1b544-15b6-4854-8483-316477938662',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'VideoUpload.tsx:handleGetQCDone',message:'Creating job with qcMode',data:{qcMode:qcMode,video_url:videoUrl,duration_sec:videoDuration},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'E'})}).catch(()=>{});
-      // #endregion
+      // Upload video to Supabase Storage first
+      const videoUrl = await uploadVideo(selectedFile);
+
+      console.log('[VideoUpload] Video uploaded to:', videoUrl);
 
       const job = await jobsApi.create({
         video_url: videoUrl,
@@ -176,10 +216,11 @@ export default function VideoUpload({ qcMode, onJobCreated }: VideoUploadProps) 
 
       // Trigger refresh of active queue
       window.dispatchEvent(new CustomEvent('jobCreated', { detail: job }));
-      
+
       // Reset form IMMEDIATELY after successful creation
       handleRemoveFile();
-      
+      setUploadProgress(0);
+
       // Notify parent to refresh credits (await to ensure it completes)
       if (onJobCreated) {
         try {
@@ -191,6 +232,7 @@ export default function VideoUpload({ qcMode, onJobCreated }: VideoUploadProps) 
       }
     } catch (err: any) {
       setError(err.message || 'Failed to create job');
+      setUploadProgress(0);
     } finally {
       setLoading(false);
     }
@@ -211,15 +253,13 @@ export default function VideoUpload({ qcMode, onJobCreated }: VideoUploadProps) 
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
         onClick={handleClick}
-        className={`border-2 border-dashed rounded-xl p-12 text-center transition-all ${
-          selectedFile ? 'cursor-default' : 'cursor-pointer'
-        } ${
-          isDragging
+        className={`border-2 border-dashed rounded-xl p-12 text-center transition-all ${selectedFile ? 'cursor-default' : 'cursor-pointer'
+          } ${isDragging
             ? 'border-blue-500 bg-blue-500/10'
             : selectedFile
-            ? 'border-green-500/50 bg-green-500/5'
-            : 'border-white/20 hover:border-white/30 bg-white/[0.03]'
-        }`}
+              ? 'border-green-500/50 bg-green-500/5'
+              : 'border-white/20 hover:border-white/30 bg-white/[0.03]'
+          }`}
       >
         <input
           ref={fileInputRef}
@@ -229,9 +269,8 @@ export default function VideoUpload({ qcMode, onJobCreated }: VideoUploadProps) 
           onChange={handleFileChange}
         />
         <div className="flex flex-col items-center gap-4">
-          <div className={`w-16 h-16 rounded-full flex items-center justify-center ${
-            selectedFile ? 'bg-green-500/20' : 'bg-white/10'
-          }`}>
+          <div className={`w-16 h-16 rounded-full flex items-center justify-center ${selectedFile ? 'bg-green-500/20' : 'bg-white/10'
+            }`}>
             {loadingDuration ? (
               <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
             ) : selectedFile ? (
@@ -258,7 +297,7 @@ export default function VideoUpload({ qcMode, onJobCreated }: VideoUploadProps) 
                 )}
                 <p className="text-gray-400 text-sm mt-2">
                   Ready to analyze • {' '}
-                  <button 
+                  <button
                     onClick={handleRemoveFile}
                     className="text-red-400 hover:text-red-300 underline"
                   >
@@ -325,7 +364,9 @@ export default function VideoUpload({ qcMode, onJobCreated }: VideoUploadProps) 
         {loading ? (
           <span className="flex items-center justify-center gap-2">
             <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-            Processing...
+            {uploadProgress > 0 && uploadProgress < 100
+              ? `Uploading... ${uploadProgress}%`
+              : 'Processing...'}
           </span>
         ) : (
           `Get QC Done${videoDuration ? ` (${calculateCredits()} credits)` : ''}`

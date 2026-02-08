@@ -72,32 +72,61 @@ class N8NService:
         print(f"[n8n] Payload: {payload}")
         print(f"[n8n] Headers: {self._get_headers()}")
         
-        # #region agent log
-        import json, time; open('/Users/gargichandna/Desktop/QC Lobby/.cursor/debug.log','a').write(json.dumps({"hypothesisId":"B_http","location":"n8n.py:trigger_qc_job","message":"Calling n8n webhook","data":{"webhook_url":self.webhook_url,"job_id":job_id,"callback_base_url":self.callback_base_url},"timestamp":int(time.time()*1000),"sessionId":"debug-session"})+'\n')
-        # #endregion
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:  # Increased timeout for slower n8n workflows
+                response = await client.post(
+                    self.webhook_url,
+                    json=payload,
+                    headers=self._get_headers()
+                )
+        except httpx.TimeoutException:
+            # n8n workflow takes longer than timeout - this is okay!
+            # n8n is still processing and will send callback when done
+            print(f"[n8n] Request timed out - n8n is likely still processing, will receive callback later")
+            return {"status": "acknowledged", "message": "n8n request timed out but likely processing"}
+        except httpx.RequestError as e:
+            # Network error - this is a real failure
+            print(f"[n8n] Network error: {e}")
+            raise Exception(f"n8n network error: {e}")
         
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                self.webhook_url,
-                json=payload,
-                headers=self._get_headers()
+        print(f"[n8n] Response status: {response.status_code}")
+        print(f"[n8n] Response body: {response.text[:500] if response.text else '(empty)'}")
+        
+        # n8n should respond with acknowledgment or QC results
+        if response.status_code >= 400:
+            raise Exception(f"n8n webhook failed: {response.status_code} - {response.text}")
+        
+        # n8n might return empty body on success (just acknowledgment)
+        if not response.text or response.text.strip() == "":
+            print(f"[n8n] Empty response (accepted as acknowledgment)")
+            return {"status": "acknowledged", "message": "n8n accepted the request"}
+        
+        try:
+            response_json = response.json()
+        except Exception:
+            # If n8n returns non-JSON, it's likely an HTML error page or raw text
+            raise Exception(
+                f"n8n returned invalid response: {response.text[:200]}"
             )
-            
-            print(f"[n8n] Response status: {response.status_code}")
-            print(f"[n8n] Response body: {response.text[:500]}")
-            
-            # #region agent log
-            import json, time; open('/Users/gargichandna/Desktop/QC Lobby/.cursor/debug.log','a').write(json.dumps({"hypothesisId":"B_http","location":"n8n.py:trigger_qc_job:response","message":"n8n response received","data":{"status_code":response.status_code,"response_text":response.text[:200]},"timestamp":int(time.time()*1000),"sessionId":"debug-session"})+'\n')
-            # #endregion
-            
-            # n8n should respond quickly with acknowledgment
-            if response.status_code >= 400:
-                raise Exception(f"n8n webhook failed: {response.status_code} - {response.text}")
-            
-            try:
-                return response.json()
-            except Exception:
-                return {"status": "queued", "raw_response": response.text}
+
+        # If n8n returns the QC results directly (synchronous workflow), 
+        # that's valid - just acknowledge and return
+        if isinstance(response_json, list):
+            print(f"[n8n] Received QC results directly ({len(response_json)} items) - workflow is synchronous")
+            return {"status": "acknowledged", "message": "n8n returned results directly", "results": response_json}
+        
+        # Check for logical errors in the response body
+        # n8n might return {"message": "Workflow is not active", "code": 400} with a 200 OK
+        if isinstance(response_json, dict):
+            # Check for error messages
+            if response_json.get("message") and "error" in str(response_json.get("message")).lower():
+                print(f"[n8n] Logical error in response: {response_json}")
+                raise Exception(f"n8n workflow error: {response_json.get('message')}")
+            # Any other dict response is fine (could be acknowledgment or status)
+            return response_json
+        
+        # Anything else, just return it
+        return response_json
     
     def validate_api_key(self, provided_key: str) -> bool:
         """

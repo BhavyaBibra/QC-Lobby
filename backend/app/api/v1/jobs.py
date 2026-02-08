@@ -1,7 +1,7 @@
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
-from app.core.supabase import supabase
+from app.core.supabase import supabase, with_retry
 from app.core.auth import get_current_user
 from enum import Enum
 from typing import Literal, Optional
@@ -28,17 +28,61 @@ class JobStatusUpdate(BaseModel):
     status: JobStatus
 
 
+@with_retry()
+def _query_user_team(user_id: str):
+    """Get user's team_id with retry on transient failures."""
+    return supabase.table("users").select("team_id").eq("id", user_id).execute()
+
+
+@with_retry()
+def _query_team_credits(team_id: str):
+    """Get team credits with retry on transient failures."""
+    return supabase.table("teams").select("credits").eq("id", team_id).execute()
+
+
+@with_retry()
+def _query_jobs_by_team(team_id: str):
+    """List all jobs for a team with retry on transient failures."""
+    return supabase.table("qc_jobs").select("*").eq("team_id", team_id).order("created_at", desc=True).execute()
+
+
+@with_retry()
+def _query_job_by_id(job_id: UUID, team_id: str = None):
+    """Get a specific job with retry on transient failures."""
+    query = supabase.table("qc_jobs").select("*").eq("id", job_id)
+    if team_id:
+        query = query.eq("team_id", team_id)
+    return query.limit(1).execute()
+
+
+@with_retry()
+def _count_jobs_by_status(team_id: str, status_val: str):
+    """Count jobs by status with retry on transient failures."""
+    return supabase.table("qc_jobs").select("id", count="exact").eq("team_id", team_id).eq("status", status_val).execute()
+
+
+@with_retry()
+def _insert_job(job_data: dict):
+    """Insert a new job with retry on transient failures."""
+    return supabase.table("qc_jobs").insert(job_data).execute()
+
+
+@with_retry()
+def _update_team_credits(team_id: str, new_credits: int):
+    """Update team credits with retry on transient failures."""
+    return supabase.table("teams").update({"credits": new_credits}).eq("id", team_id).execute()
+
+
+@with_retry()
+def _update_job_status(job_id: UUID, new_status: str):
+    """Update job status with retry on transient failures."""
+    return supabase.table("qc_jobs").update({"status": new_status}).eq("id", job_id).execute()
+
+
 @router.get("/jobs")
 def list_jobs(user=Depends(get_current_user)):
     """List all jobs for the current user's team only."""
-    # Get user's team_id for authorization
-    user_profile = (
-        supabase
-        .table("users")
-        .select("team_id")
-        .eq("id", user.id)
-        .execute()
-    )
+    user_profile = _query_user_team(user.id)
     
     if not user_profile.data:
         raise HTTPException(
@@ -47,29 +91,13 @@ def list_jobs(user=Depends(get_current_user)):
         )
     
     team_id = user_profile.data[0]["team_id"]
-    
-    # Only return jobs belonging to this team
-    response = (
-        supabase
-        .table("qc_jobs")
-        .select("*")
-        .eq("team_id", team_id)
-        .order("created_at", desc=True)
-        .execute()
-    )
+    response = _query_jobs_by_team(team_id)
     return response.data
 
 
 @router.get("/jobs/{job_id}")
 def get_job(job_id: UUID, user=Depends(get_current_user)):
-    # Get user's team_id for authorization
-    user_profile = (
-        supabase
-        .table("users")
-        .select("team_id")
-        .eq("id", user.id)
-        .execute()
-    )
+    user_profile = _query_user_team(user.id)
     
     if not user_profile.data:
         raise HTTPException(
@@ -78,16 +106,7 @@ def get_job(job_id: UUID, user=Depends(get_current_user)):
         )
     
     team_id = user_profile.data[0]["team_id"]
-    
-    # Fetch the job
-    job_res = (
-        supabase
-        .table("qc_jobs")
-        .select("*")
-        .eq("id", job_id)
-        .eq("team_id", team_id)
-        .execute()
-    )
+    job_res = _query_job_by_id(job_id, team_id)
     
     if not job_res.data:
         raise HTTPException(
@@ -100,17 +119,8 @@ def get_job(job_id: UUID, user=Depends(get_current_user)):
 
 @router.post("/jobs")
 def create_job(job: JobCreate, user=Depends(get_current_user)):
-    # #region agent log
-    import json, time; open('/Users/gargichandna/Desktop/QC Lobby/.cursor/debug.log','a').write(json.dumps({"hypothesisId":"E,F","location":"jobs.py:create_job:entry","message":"Job creation request received","data":{"qc_mode":job.qc_mode,"video_url":job.video_url[:50],"duration_sec":job.duration_sec},"timestamp":int(time.time()*1000),"sessionId":"debug-session"})+'\n')
-    # #endregion
     # Get user's team_id
-    user_profile = (
-        supabase
-        .table("users")
-        .select("team_id")
-        .eq("id", user.id)
-        .execute()
-    )
+    user_profile = _query_user_team(user.id)
 
     if not user_profile.data:
         raise HTTPException(
@@ -121,13 +131,7 @@ def create_job(job: JobCreate, user=Depends(get_current_user)):
     team_id = user_profile.data[0]["team_id"]
 
     # Fetch team credits
-    team_res = (
-        supabase
-        .table("teams")
-        .select("credits")
-        .eq("id", team_id)
-        .execute()
-    )
+    team_res = _query_team_credits(team_id)
 
     if not team_res.data:
         raise HTTPException(
@@ -138,23 +142,8 @@ def create_job(job: JobCreate, user=Depends(get_current_user)):
     team_credits = team_res.data[0]["credits"] or 0
 
     # Count active jobs (pending or processing)
-    pending_res = (
-        supabase
-        .table("qc_jobs")
-        .select("id", count="exact")
-        .eq("team_id", team_id)
-        .eq("status", JobStatus.pending.value)
-        .execute()
-    )
-    
-    processing_res = (
-        supabase
-        .table("qc_jobs")
-        .select("id", count="exact")
-        .eq("team_id", team_id)
-        .eq("status", JobStatus.processing.value)
-        .execute()
-    )
+    pending_res = _count_jobs_by_status(team_id, JobStatus.pending.value)
+    processing_res = _count_jobs_by_status(team_id, JobStatus.processing.value)
     
     active_jobs_count = (pending_res.count or 0) + (processing_res.count or 0)
 
@@ -189,11 +178,8 @@ def create_job(job: JobCreate, user=Depends(get_current_user)):
     # Add thumbnail if provided
     if job.thumbnail_url:
         job_data["thumbnail_url"] = job.thumbnail_url
-    
-    # #region agent log
-    import json, time; open('/Users/gargichandna/Desktop/QC Lobby/.cursor/debug.log','a').write(json.dumps({"hypothesisId":"F","location":"jobs.py:create_job:before_insert","message":"Job data to insert","data":{"job_data":job_data},"timestamp":int(time.time()*1000),"sessionId":"debug-session"})+'\n')
-    # #endregion
-    job_response = supabase.table("qc_jobs").insert(job_data).execute()
+
+    job_response = _insert_job(job_data)
 
     if not job_response.data:
         raise HTTPException(
@@ -201,17 +187,13 @@ def create_job(job: JobCreate, user=Depends(get_current_user)):
             detail="Failed to create job"
         )
 
-    # #region agent log
-    import json, time; open('/Users/gargichandna/Desktop/QC Lobby/.cursor/debug.log','a').write(json.dumps({"hypothesisId":"F","location":"jobs.py:create_job:after_insert","message":"Job created in DB","data":{"job_id":job_response.data[0].get("id"),"qc_mode_stored":job_response.data[0].get("qc_mode"),"status":job_response.data[0].get("status")},"timestamp":int(time.time()*1000),"sessionId":"debug-session"})+'\n')
-    # #endregion
-
     # Deduct credits from team
     new_credits = team_credits - credits_used
-    supabase.table("teams").update({"credits": new_credits}).eq("id", team_id).execute()
+    _update_team_credits(team_id, new_credits)
 
-    # Job is now pending - the background worker (auto_job_processor) will pick it up
-    # and dispatch it to n8n for processing
+    # Job is now pending - the background worker will pick it up
     return job_response.data[0]
+
 
 @router.patch("/jobs/{job_id}/status")
 def update_job_status(
@@ -229,13 +211,7 @@ def update_job_status(
         )
 
     # Fetch the user's team
-    user_profile = (
-        supabase
-        .table("users")
-        .select("team_id")
-        .eq("id", user.id)
-        .execute()
-    )
+    user_profile = _query_user_team(user.id)
     if not user_profile.data:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -244,14 +220,7 @@ def update_job_status(
     team_id = user_profile.data[0]["team_id"]
 
     # Fetch the job to check existence and team ownership
-    job_res = (
-        supabase
-        .table("qc_jobs")
-        .select("*")
-        .eq("id", job_id)
-        .limit(1)
-        .execute()
-    )
+    job_res = _query_job_by_id(job_id)
     if not job_res.data:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -265,13 +234,7 @@ def update_job_status(
         )
 
     # Update the job status
-    update_res = (
-        supabase
-        .table("qc_jobs")
-        .update({"status": new_status.value})
-        .eq("id", job_id)
-        .execute()
-    )
+    update_res = _update_job_status(job_id, new_status.value)
     if not update_res.data:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

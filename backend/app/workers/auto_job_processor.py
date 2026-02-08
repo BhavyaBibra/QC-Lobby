@@ -30,9 +30,8 @@ async def dispatch_job_to_n8n(job: dict) -> bool:
         print(f"[n8n] Job {job['id']} dispatched to n8n: {response}")
         return True
     except Exception as e:
-        # #region agent log
-        import json, time; open('/Users/gargichandna/Desktop/QC Lobby/.cursor/debug.log','a').write(json.dumps({"hypothesisId":"B_detail","location":"auto_job_processor.py:dispatch_error","message":"n8n dispatch exception","data":{"job_id":job["id"],"error":str(e),"error_type":type(e).__name__},"timestamp":int(time.time()*1000),"sessionId":"debug-session"})+'\n')
-        # #endregion
+        # Debug logging removed
+
         print(f"[n8n] Failed to dispatch job {job['id']} to n8n: {e}")
         return False
 
@@ -84,9 +83,11 @@ async def auto_process_jobs():
             )
             
             processing_count = processing_res.count or 0
+            print(f"[worker] Currently processing: {processing_count} jobs")
             
             # If >= 2 jobs are processing, wait and continue
             if processing_count >= 2:
+                print(f"[worker] Max concurrent jobs reached ({processing_count}), waiting...")
                 await asyncio.sleep(3)
                 continue
             
@@ -103,14 +104,14 @@ async def auto_process_jobs():
             
             if not pending_res.data:
                 # No pending jobs, wait and continue
+                print(f"[worker] No pending jobs found, waiting...")
                 await asyncio.sleep(3)
                 continue
             
             job = pending_res.data[0]
             job_id = job["id"]
-            # #region agent log
-            import json, time; open('/Users/gargichandna/Desktop/QC Lobby/.cursor/debug.log','a').write(json.dumps({"hypothesisId":"A,B","location":"auto_job_processor.py:found_pending","message":"Found pending job to process","data":{"job_id":job_id,"qc_mode":job.get("qc_mode"),"status":job.get("status")},"timestamp":int(time.time()*1000),"sessionId":"debug-session"})+'\n')
-            # #endregion
+            print(f"[worker] Found pending job: {job_id}")
+
             
             # Atomically update to "processing"
             update_res = (
@@ -131,13 +132,11 @@ async def auto_process_jobs():
             
             # Dispatch to n8n or use mock processing
             if settings.USE_N8N_PROCESSING:
-                # #region agent log
-                import json, time; open('/Users/gargichandna/Desktop/QC Lobby/.cursor/debug.log','a').write(json.dumps({"hypothesisId":"B","location":"auto_job_processor.py:before_n8n_dispatch","message":"About to dispatch to n8n","data":{"job_id":job_id,"n8n_enabled":True},"timestamp":int(time.time()*1000),"sessionId":"debug-session"})+'\n')
-                # #endregion
+                # Debug logging removed
+
                 success = await dispatch_job_to_n8n(job)
-                # #region agent log
-                import json, time; open('/Users/gargichandna/Desktop/QC Lobby/.cursor/debug.log','a').write(json.dumps({"hypothesisId":"B","location":"auto_job_processor.py:after_n8n_dispatch","message":"n8n dispatch result","data":{"job_id":job_id,"success":success},"timestamp":int(time.time()*1000),"sessionId":"debug-session"})+'\n')
-                # #endregion
+                # Debug logging removed
+
                 
                 if not success:
                     # n8n dispatch failed - mark job as failed, do NOT fallback to mock
