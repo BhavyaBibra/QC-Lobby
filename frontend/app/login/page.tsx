@@ -30,14 +30,14 @@ export default function LoginPage() {
 
     try {
       const { data, error } = await signInWithEmail(email, password);
-      
+
       if (error) {
         setError(error.message);
         setLoading(false);
         return;
       }
 
-      if (data.session) {
+      if (data?.session) {
         router.push('/');
       }
     } catch (err: any) {
@@ -52,7 +52,7 @@ export default function LoginPage() {
 
     try {
       const { error } = await signInWithGoogle(`${window.location.origin}/auth/callback`);
-      
+
       if (error) {
         setError(error.message);
         setLoading(false);
